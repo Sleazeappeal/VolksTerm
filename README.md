@@ -308,15 +308,38 @@ without errors, dialed out, and worked as in the VICE tests. The BBS and its
 TouchTerm 3.9 (Volks 6480 version) and CBterm V6.6, in both C64 and C128
 mode. These disks are not in the repo.
 
-## Still unverified (test on the real machine)
+## To be verified / implemented
 
-- The guide says "you should never draw directly into screen memory". The
-  tutorial draws through `setctx`/`ctxdraw` into `scrbuf`/`colbuf`;
-  `drawmain` writes those buffers directly. Most likely fine (VIC screen RAM
-  is what's meant), but not stated.
-- C64 OS drivers have `nhdpause`/`nhdresum` hooks (C64 OS pauses RS-232 NMIs,
-  presumably around disk I/O). VolksTerm isn't a driver and gets no such call.
-- Logical file 126: no reservation rules documented.
+### To verify
+
+- **Disk access while online.** C64 OS drivers have `nhdpause`/`nhdresum`
+  hooks (C64 OS pauses RS-232 NMIs, presumably around disk I/O). VolksTerm
+  isn't a driver and gets no such call. Loading About or Help while online
+  works (RX is switched back on by `poll`, bytes that arrive during the load
+  are lost); longer disk I/O, JiffyDOS and the CMD HD are untested.
+- **Drawing into `scrbuf`/`colbuf`.** The guide says "you should never draw
+  directly into screen memory". The tutorial draws through
+  `setctx`/`ctxdraw`; `drawmain` writes those buffers directly. It works on
+  real hardware, and VIC screen RAM is most likely what's meant, but the
+  docs don't say.
+- **Logical file 126.** No reservation rules documented.
+
+### To implement
+
+- **File download (and upload) from the BBS.** Not implemented. It needs a
+  transfer protocol the BBS offers (for example XMODEM) and writing to disk
+  while online, which is exactly the open point above: the KERNAL IEC
+  routines switch RS-232 RX off, and NMIs disturb IEC/JiffyDOS timing. A
+  block protocol fits this: receive one block into memory, write it to disk
+  while the sender waits for the ACK, switch RX back on, then ACK. The
+  target file would be chosen through C64 OS (File Manager / file reference),
+  not with raw KERNAL calls.
+- **RUN/STOP+RESTORE.** While the app runs it owns `$0318`, so
+  RUN/STOP+RESTORE triggers the KERNAL warm start. C64 OS's own drivers
+  handle it with `quitapp` instead (see `chkrstr` in
+  `ref/wic64-driver/nhd.slxx.zi.asm`). Not copied yet, because telling
+  RESTORE from RS-232 NMIs needs the CIA2 ICR value the KERNAL handler reads
+  itself.
 
 ## Known risks / limits
 
@@ -324,12 +347,10 @@ mode. These disks are not in the repo.
   first (see above).
 - Set the C64 OS network driver to None (Network settings, Drvr tab), so no
   driver such as `up24.zi` claims the user port.
-- Avoid disk access while online (NMI vs. IEC/JiffyDOS timing).
-- While the app runs it owns `$0318`: RUN/STOP+RESTORE triggers the KERNAL
-  warm start. C64 OS's own drivers handle it with `quitapp` instead (see
-  `chkrstr` in `ref/wic64-driver/nhd.slxx.zi.asm`); not copied yet, because
-  telling RESTORE from RS-232 NMIs needs the CIA2 ICR value the KERNAL handler
-  reads itself.
+- Avoid disk access while online (NMI vs. IEC/JiffyDOS timing), see
+  "To be verified / implemented".
+- RUN/STOP+RESTORE quits to the KERNAL warm start, not to C64 OS (see "To
+  implement").
 - C64 OS background: BBS colors assume a black background.
 - `linetest.bas` runs on the stock KERNAL, where 1 jiffy = 1/60 s on PAL too,
   so its pulse timing (4/3 jiffies) differs from the app.
