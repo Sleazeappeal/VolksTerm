@@ -33,10 +33,12 @@ Credits
 =======
 
 VolksTerm and its icon by Sleazy.
-VolksTerm 0.1 was made with Claude
-Code 2.1.325 by Anthropic (model
-Claude Opus 5.5): its code and docs
-were written with Claude Code.
+VolksTerm 0.1 was started with
+Claude (claude.ai) and made with
+Claude Code 2.1.325 by Anthropic
+(model Claude Opus 5.5): its code
+and docs were written with Claude
+Code.
 C64 OS by Greg Nacu, OpCoders Inc.
 Built with the C64 OS SDK headers
 and bundleapp.py from OpCoders'

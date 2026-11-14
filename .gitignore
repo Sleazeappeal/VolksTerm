@@ -9,6 +9,8 @@
 *.dhd
 *.dhd_orig
 /.claude/
+# Third-party terminal programs used for testing
+*.d64
 
 # C64 OS SDK headers: OpCoders' work, not ours to publish.
 # Copy them from c64os-dev (see README, Step 2: build).

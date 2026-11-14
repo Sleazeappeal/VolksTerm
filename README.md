@@ -3,6 +3,33 @@
 300 baud, 8N1, PETSCII terminal. Pulse dialing in software. For "dumb" user-port
 modems with the Commodore 1650 pinout (Volks 6420 assumed compatible, see Step 1).
 
+## License and credits
+
+VolksTerm (`main.a`, the icon, the bundle files) is Copyright (c) 2026
+Sleazy, MIT License: see `LICENSE`. The installed app carries the same
+text in `readme.t`, and `about.t` names the author.
+
+- Started with Claude (claude.ai, the online client): the Volks 6420
+  diagnosis and the C128 BASIC 7.0 test programs in `Claude_proj/`
+  (Hungarian) were made there.
+- Made with Claude Code: VolksTerm 0.1 (`main.a`, `carhelp.py`,
+  `linetest.bas`, the help and readme texts, this README and the `bbs/`
+  package) was written with Claude Code 2.1.325 by Anthropic, model Claude
+  Opus 5.5. The icon is by Sleazy.
+- C64 OS by Greg Nacu, OpCoders Inc. VolksTerm runs on it but contains
+  none of it.
+- Built with the C64 OS SDK headers from OpCoders' `c64os-dev` (MIT,
+  Copyright (c) 2023-2024 OpCoders Inc.), which are not included here;
+  `bundleapp.py` from the same repo builds the `.car`.
+- Assembled with TMPx by Style. Tested with VICE (GPL). Local copies of
+  both live in `tools/`, which is not in the repo except for the VICE
+  configuration `tools/vice/volksterm.ini`.
+- `bbs/` adapts Synchronet BBS (Copyright Rob Swindell, GPL version 2 or
+  later), so the `bbs/` package is GPL-2.0-or-later: see `bbs/NOTICE.txt`
+  and `bbs/gpl.txt`. The same screens are also in the
+  [synchronet-bbs-modem-dialin](https://github.com/Sleazeappeal/synchronet-bbs-modem-dialin)
+  repository (`synchronet/40col/`).
+
 ## Files
 
 | File | Purpose |
@@ -17,6 +44,7 @@ modems with the Commodore 1650 pinout (Volks 6420 assumed compatible, see Step 1
 | `LICENSE` | MIT license of VolksTerm |
 | `linetest.bas` | BASIC hardware test: hook, pulse dial, DCD |
 | `bbs/` | Synchronet 40-column screens + `install.sh` (see "BBS side"), GPL |
+| `Claude_proj/` | Volks 6420 diagnosis on the C128 from the claude.ai start of the project (Hungarian, `.md` + `.pdf`) |
 
 ## Step 1: verify the hardware first (plain C64 mode, no C64 OS)
 
@@ -251,11 +279,33 @@ Confirmed from the SDK and OpCoders example sources (`ref/`):
 - `about.t`: every installed app has a leading space on the version line
   (`" 0.2"`), so `app_about` in `bundle.ini` has one too.
 
-## Tested on real hardware
+## Test methodology
 
-VolksTerm 0.1 on a Commodore 128 (C64 mode) with a CMD HD4000 and C64 OS
-1.08 (without the 1.09 update), 2026-11-14: installed from the `.car` without
-errors, dialed out, and worked as in the VICE tests.
+Before VolksTerm, the modem was examined on the C128 (`Claude_proj/`):
+BASIC 7.0 programs PORTMON, HOOKTEST, TXTEST and PULSE, to find out whether
+the Volks 6420 follows the 1650 pinout, plus line measurements on the ATA.
+Then three stages, each one only after the previous one passed:
+
+1. **Line test on the real machine** (Step 1): `linetest.bas` in plain C64
+   mode, without C64 OS. It checks the hook line (PB5), pulse dialing (the
+   PBX must see the right digits) and DCD (PB4).
+2. **VICE** (see "Test in VICE"): `x64sc` from VICE 3.10 at 100% speed (no
+   warp) with `tools/vice/volksterm.ini`: JiffyDOS, C64 OS 1.09 on an
+   emulated CMD HD, user-port RS-232 at 300 baud as raw TCP to
+   `127.0.0.1:2341`, forwarded with SSH to the PETSCII relay of a test
+   Synchronet BBS (never the live one). Checked: login, menus, every
+   40-column screen in `bbs/` (by screenshot), About and Help opened while
+   online (RX must keep working afterwards), hang-up with C=+X. VICE does
+   not pass the hook line, so dialing itself is not tested there.
+3. **Real hardware**: install the `.car` with File Manager, dial the BBS
+   line through the modem, repeat the stage 2 checks.
+
+Result, 2026-11-14: VolksTerm 0.1 on a Commodore 128 (C64 mode) with a CMD
+HD4000 and C64 OS 1.08 (without the 1.09 update) installed from the `.car`
+without errors, dialed out, and worked as in the VICE tests. The BBS and its
+40-column screens were also checked from the same C128 and Volks 6420 with
+TouchTerm 3.9 (Volks 6480 version) and CBterm V6.6, in both C64 and C128
+mode. These disks are not in the repo.
 
 ## Still unverified (test on the real machine)
 
@@ -282,24 +332,3 @@ errors, dialed out, and worked as in the VICE tests.
 - C64 OS background: BBS colors assume a black background.
 - `linetest.bas` runs on the stock KERNAL, where 1 jiffy = 1/60 s on PAL too,
   so its pulse timing (4/3 jiffies) differs from the app.
-
-## License and credits
-
-VolksTerm (`main.a`, the icon, the bundle files) is Copyright (c) 2026
-Sleazy, MIT License: see `LICENSE`. The installed app carries the same
-text in `readme.t`, and `about.t` names the author.
-
-- Made with Claude Code: VolksTerm 0.1 (`main.a`, `carhelp.py`,
-  `linetest.bas`, the help and readme texts, this README and the `bbs/`
-  package) was written with Claude Code 2.1.325 by Anthropic, model Claude
-  Opus 5.5. The icon is by Sleazy.
-- C64 OS by Greg Nacu, OpCoders Inc. VolksTerm runs on it but contains
-  none of it.
-- Built with the C64 OS SDK headers from OpCoders' `c64os-dev` (MIT,
-  Copyright (c) 2023-2024 OpCoders Inc.), which are not included here;
-  `bundleapp.py` from the same repo builds the `.car`.
-- Assembled with TMPx by Style. Tested with VICE (GPL); `tools/` holds
-  local copies of both and isn't part of the app.
-- `bbs/` adapts Synchronet BBS (Copyright Rob Swindell, GPL version 2 or
-  later), so the `bbs/` package is GPL-2.0-or-later: see `bbs/NOTICE.txt`
-  and `bbs/gpl.txt`.
