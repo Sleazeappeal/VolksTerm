@@ -1,0 +1,1042 @@
+;----------------------------------------------------------
+; VolksTerm 0.1 - C64 OS Application
+; 300 baud terminal for "dumb" user-port modems
+; (Volks 6420 / Commodore 1650-class pinout)
+;
+; Copyright (c) 2026 Sleazy. MIT License, see LICENSE.
+; Needs the C64 OS SDK headers in os/ (not included):
+; github.com/OpCoders-Inc/c64os-dev, include/v1.09/os,
+; Copyright (c) 2023-2024 OpCoders Inc., MIT License.
+;
+; Assembler: TurboMacroPro / TMPx (C64 OS SDK conventions)
+;
+; Design:
+;  - Does NOT use network.lib (CNP/TCP only, needs a
+;    smart WiFi modem). Uses the KERNAL ROM RS-232 driver
+;    (device 2) directly: OPEN/CHKIN/CHKOUT/CHROUT/CLRCHN
+;    are marked "compatible" in the C64 OS KERNAL table.
+;  - Pulse dialing in software on PB5 (HOOK, low=off hook),
+;    driven by a realtime C64 OS timer (1 jiffy resolution).
+;  - Carrier detect on PB4 (DCD, low=carrier).
+;  - Own NMI wrapper on $0318: C64 OS (and drawmain) patch
+;    I/O out at times, the KERNAL RS-232 NMI code needs I/O
+;    and KERNAL ROM, so the wrapper maps both in around it.
+;  - Own 40x23 PETSCII screen model, copied into the
+;    system screen buffer rows 1..23 in drawmain.
+;----------------------------------------------------------
+
+         .include "./os/h/modules.h"   ;os = SDK v1.09 copy
+
+         #inc_s "app"
+         #inc_s "colors"
+         #inc_s "ctxdraw"
+         #inc_s "input"
+         #inc_s "io"
+         #inc_s "pointer"
+         #inc_s "switch"
+         #inc_s "screen"
+         #inc_s "service"
+         #inc_s "memory"
+         #inc_s "timers"
+
+;--- KERNAL ROM entry points ------------------------------
+k_setlfs = $ffba
+k_setnam = $ffbd
+k_open   = $ffc0
+k_close  = $ffc3
+k_chkin  = $ffc6
+k_chkout = $ffc9
+k_clrchn = $ffcc
+k_chrout = $ffd2
+
+;--- KERNAL RS-232 workspace (C64 KERNAL memory map) ------
+ribuf    = $f7          ;ptr to 256 byte receive buffer
+robuf    = $f9          ;ptr to 256 byte transmit buffer
+ridbe    = $029b        ;rx buffer end index (NMI writes)
+ridbs    = $029c        ;rx buffer start index (we read)
+enabl    = $02a1        ;RS-232 NMI enable mask (KERNAL)
+nminv    = $0318        ;NMI RAM vector
+jiffy    = $a2          ;KERNAL jiffy clock low byte (C64 OS
+                        ;IRQ calls UDTIM every jiffy)
+kernmi   = $fe47        ;KERNAL ROM NMI handler (RS-232),
+                        ;ends with RTI
+
+;--- Hardware ---------------------------------------------
+cia2prb  = $dd01
+cia2ddrb = $dd03
+cia2icr  = $dd0d
+
+hookbit  = %00100000    ;PB5: 0 = off hook (line seized)
+dcdbit   = %00010000    ;PB4: 0 = carrier detected
+
+;--- Tunables (PAL, 1 jiffy = 20 ms) ----------------------
+lfn_rs   = 126          ;logical file number for RS-232
+t_brk    = 3            ;pulse break (on hook)  60 ms
+t_make   = 2            ;pulse make  (off hook) 40 ms
+t_idig   = 40           ;inter-digit pause     800 ms
+t_dtone  = 100          ;wait for dial tone      2 s
+t_comma  = 100          ;"," pause               2 s
+pollps   = 25           ;poll ticks per second (2 jiffies)
+cwait    = 45           ;carrier wait, seconds
+maxdial  = 24           ;max dial string length
+
+;--- Terminal geometry ------------------------------------
+tcols    = 40
+trows    = 23           ;screen rows 1..23 (menu/status)
+tsize    = tcols*trows  ;920 bytes
+scrdst   = scrbuf+tcols ;screen row 1 in system buffers
+coldst   = colbuf+tcols
+
+;--- States -----------------------------------------------
+st_idle  = 0
+st_dial  = 1
+st_wcar  = 2
+st_onl   = 3
+
+ph_wait  = 0
+ph_brk   = 1
+ph_make  = 2
+
+;==========================================================
+         *= appbase
+
+         .word init
+         .word msgcmd
+         .word willquit
+         .word raw_rts          ;REU freeze
+         .word raw_rts          ;REU thaw
+
+;--- Screen layer -----------------------------------------
+layer    .word drawmain
+         .word sec_rts          ;mouse: not used
+         .word kcmd
+         .word kprnt
+         .byte 0                ;layer index (layerpush)
+
+;--- Timers (ttime[3] tstat ttrig[2] tvalu[3]) -----------
+; 9 bytes; timeque keeps only a pointer (os/kernal/timers.o)
+polltmr  .byte 2,0,0
+         .byte tintrvl
+         .word poll
+         .byte 2,0,0
+
+dialtmr  .byte 1,0,0
+         .byte tintrvl+trealtm
+         .word dtick
+         .byte 1,0,0
+
+;==========================================================
+init     #ldxy externs
+         jsr initextern
+
+         lda #mapapp            ;terminal char buffer
+         ldx #4
+         jsr pgalloc
+         bcs initerr
+         sty tscrpg
+         lda #mapapp            ;terminal color buffer
+         ldx #4
+         jsr pgalloc
+         bcs initerr
+         sty tcolpg
+         lda #mapapp            ;RS-232 rx/tx buffers
+         ldx #2
+         jsr pgalloc
+         bcs initerr
+         sty rsbufpg
+
+         jsr buildrows
+         jsr tclr
+
+         #ldxy layer
+         jsr layerpush
+
+         #ldxy msg_hello
+         jsr tputs
+
+         jsr prompt
+
+         #ldxy polltmr
+         jsr timeque
+         #ldxy dialtmr
+         jsr timeque
+         rts
+
+initerr  jmp quitapp            ;out of memory: fail fast
+
+;----------------------------------------------------------
+willquit lda polltmr+tstat     ;cancel our timers. The loader
+         ora #tcancel           ;clears the timer queue only
+         sta polltmr+tstat      ;after it has loaded over our
+         lda dialtmr+tstat      ;structs, and in between the
+         ora #tcancel           ;timer IRQ would run garbage
+         sta dialtmr+tstat      ;(crash near $c109, JAM $0913).
+         jsr wait2j             ;next IRQ dequeues them
+         lda #0
+         sta dlstate
+         sta state
+         jsr onhook
+         lda rsopenf
+         beq wq2
+         lda #$7f               ;stop all CIA2 NMIs first
+         sta cia2icr
+         lda #0                 ;CLOSE must not "return"
+         sta ribuf+1            ;our buffers to MEMTOP
+         sta robuf+1
+         lda #lfn_rs
+         jsr k_close
+         lda #0
+         sta rsopenf
+wq2      lda savedf             ;init failed before rsopen:
+         beq wq3                ;nothing saved, nothing to undo
+         ldx #3                 ;restore $f7-$fa
+wq1      lda savzp,x
+         sta ribuf,x
+         dex
+         bpl wq1
+         lda savnmi
+         sta nminv
+         lda savnmi+1
+         sta nminv+1
+wq3      rts                    ;no pgfree: the system frees
+                                ;mapapp pages on quit (memory.o
+                                ;$c0fd), like TextViewPlus expects
+
+; Wait until the jiffy clock has ticked twice, so the timer IRQ
+; has run at least once in full. Bounded (~0.6 s per tick), so
+; it cannot hang if IRQs happen to be off.
+wait2j   ldx #2
+wj1      lda jiffy
+         ldy #0
+         sty wjcnt
+wj2      cmp jiffy
+         bne wj3
+         dey
+         bne wj2
+         dec wjcnt
+         bne wj2
+         rts                    ;timeout: give up
+wj3      dex
+         bne wj1
+         rts
+
+;----------------------------------------------------------
+; Open KERNAL RS-232: 300 baud, 8N1, 3-line, full duplex
+; Out: C set = error
+;----------------------------------------------------------
+rsopen   ldx #3
+rso1     lda ribuf,x
+         sta savzp,x
+         dex
+         bpl rso1
+         lda nminv
+         sta savnmi
+         lda nminv+1
+         sta savnmi+1
+         lda #1                 ;willquit may restore now
+         sta savedf
+         lda #<nmiwrap
+         sta nminv
+         lda #>nmiwrap
+         sta nminv+1
+
+         lda #0                 ;pre-assign buffers, so
+         sta ribuf              ;OPEN leaves MEMTOP alone
+         sta robuf
+         lda rsbufpg
+         sta ribuf+1
+         clc
+         adc #1
+         sta robuf+1
+
+         lda #lfn_rs
+         ldx #2
+         ldy #0
+         jsr k_setlfs
+         lda #2
+         ldx #<rsparm
+         ldy #>rsparm
+         jsr k_setnam
+         jsr k_open             ;RS-232 OPEN always ends with
+         bcc rso2               ;C=1, A=$f0 ("MEMTOP set",
+         cmp #$f0               ;KERNAL $f47d); BASIC treats
+         bne rsoerr             ;$f0 as success too
+
+rso2     ldx #lfn_rs            ;CHKIN enables RX NMIs
+         jsr k_chkin
+         jsr k_clrchn
+         lda #1
+         sta rsopenf
+
+         jsr onhook             ;OPEN reset DDRB to %110:
+         lda cia2ddrb           ;make PB5 an output again
+         ora #hookbit
+         sta cia2ddrb
+         clc
+         rts
+rsoerr   sec
+         rts
+
+; Re-enable RS-232 RX: CHKIN on the RS-232 file starts
+; waiting for a start bit again (KERNAL $F07D). Called from
+; the poll trigger, which runs with all RAM mapped in.
+rsrxon   lda $01
+         pha
+         and #%11111000
+         ora #%00000110         ;I/O + KERNAL in, BASIC out
+         sta $01
+         ldx #lfn_rs
+         jsr k_chkin
+         jsr k_clrchn
+         pla
+         sta $01
+         rts
+
+rsparm   .byte %00000110        ;300 baud, 8 bits, 1 stop
+         .byte %00000000        ;no parity, 3-line
+
+;----------------------------------------------------------
+; NMI wrapper, reached via $0318 (ROM $FE43: SEI, JMP ($0318)).
+; Maps I/O + KERNAL ROM in, runs the KERNAL NMI handler and
+; restores $01. The handler ends with RTI, so a fake RTI
+; frame makes it return to nmiret.
+; Must live in RAM below $A000/$D000 (app code does).
+;----------------------------------------------------------
+nmiwrap  pha
+         lda $01
+         pha
+         and #%11111000
+         ora #%00000110         ;I/O + KERNAL in, BASIC out
+         sta $01
+         lda #>nmiret           ;fake RTI frame: PCH, PCL, P
+         pha
+         lda #<nmiret
+         pha
+         php
+         jmp kernmi
+nmiret   pla
+         sta $01
+         pla
+         rti
+
+;----------------------------------------------------------
+onhook   lda #$ff
+         ldx #hookbit
+         jmp setpb
+
+offhook  lda #255-hookbit
+         ldx #0
+         jmp setpb
+
+;----------------------------------------------------------
+; CIA2 port B with I/O mapped in: PB = (PB AND A) OR X.
+; Returns the new PB value in A, keeps X and Y, no zero page.
+; C64 OS calls timer triggers with all RAM mapped in (seeram,
+; timers.o $c26c/$c30d), so a plain "lda $dd01" in poll or
+; dtick reads the VIC screen RAM under I/O, not the CIA.
+;----------------------------------------------------------
+setpb    php
+         sei                    ;masks/sppb are shared with
+         sta spand+1            ;the ISR (dtick)
+         stx spor+1
+         lda $01
+         pha
+         and #%11111000
+         ora #%00000110         ;I/O + KERNAL in, BASIC out
+         sta $01
+         lda cia2prb
+spand    and #$ff
+spor     ora #$00
+         sta cia2prb
+         sta sppb
+         pla
+         sta $01
+         plp
+         lda sppb
+         rts
+
+rddcd    lda #$ff               ;A = PB AND dcdbit, Z = carrier
+         ldx #0
+         jsr setpb
+         and #dcdbit
+         rts
+
+flushrx  lda ridbe
+         sta ridbs
+         rts
+
+rssend   ldx rsopenf
+         beq rss1
+         pha
+         ldx #lfn_rs
+         jsr k_chkout
+         pla
+         jsr k_chrout
+         jmp k_clrchn
+rss1     rts
+
+;----------------------------------------------------------
+; Dialing control (main thread)
+;----------------------------------------------------------
+dodial   lda state
+         cmp #st_idle
+         bne ddx
+         lda dlen
+         beq ddx
+         lda rsopenf            ;open RS-232 on the first dial:
+         bne dd1                ;VICE connects its TCP device
+         jsr rsopen             ;at OPEN, a real line only
+         bcc dd1                ;answers after dialing
+         #ldxy msg_rserr
+         jmp tputs
+dd1      lda #st_dial
+         sta state
+         #ldxy msg_dial
+         jsr tputs
+         lda #0
+         sta dlidx
+         lda #t_dtone
+         sta dltick
+         lda #ph_wait
+         sta dlphase
+         jsr offhook
+         lda #1                 ;arm the ISR side last
+         sta dlstate
+ddx      rts
+
+hangup   lda #0
+         sta dlstate
+         lda #st_idle
+         sta state
+         jsr onhook
+         jmp prompt
+
+prompt   lda #0
+         sta dlen
+         #ldxy msg_prompt
+         jmp tputs
+
+;----------------------------------------------------------
+; Realtime timer trigger, every jiffy, runs inside the ISR.
+; Keep it short, no zero page.
+;----------------------------------------------------------
+dtick    lda dlstate
+         beq dtx
+         dec dltick
+         bne dtx
+         lda dlphase
+         cmp #ph_brk
+         beq dtbrk
+         cmp #ph_make
+         beq dtmake
+                                ;ph_wait: next dial char
+         ldx dlidx
+         cpx dlen
+         bcs dtend
+         inc dlidx
+         lda dialbuf,x
+         cmp #$2c               ;","
+         bne dtdig
+         lda #t_comma
+         sta dltick
+         rts
+dtdig    sec
+         sbc #$30
+         bne dtd1
+         lda #10                ;"0" = 10 pulses
+dtd1     sta dlcnt
+dtpulse  lda #$ff                ;break: on hook
+         ldx #hookbit
+         jsr setpb
+         lda #t_brk
+         sta dltick
+         lda #ph_brk
+         sta dlphase
+dtx      rts
+dtbrk    lda #255-hookbit       ;make: off hook
+         ldx #0
+         jsr setpb
+         lda #t_make
+         sta dltick
+         lda #ph_make
+         sta dlphase
+         rts
+dtmake   dec dlcnt
+         bne dtpulse
+         lda #t_idig
+         sta dltick
+         lda #ph_wait
+         sta dlphase
+         rts
+dtend    lda #0                 ;done, stays off hook
+         sta dlstate
+         rts
+
+;----------------------------------------------------------
+; Poll timer trigger, every 2 jiffies, main event loop.
+;----------------------------------------------------------
+poll     lda rsopenf            ;KERNAL IEC I/O (C64 OS loading
+         beq pl0                ;a utility, About, Help...)
+         lda enabl              ;turns RS-232 RX off ($F0A4);
+         and #%00010010         ;only CHKIN turns it back on
+         bne pl0
+         jsr rsrxon
+pl0      lda state
+         cmp #st_dial
+         bne pl1
+         lda dlstate
+         bne plrx
+         lda #st_wcar           ;dialing done
+         sta state
+         jsr flushrx            ;drop pulse dialing noise, keep
+                                ;what comes later: VICE connects
+                                ;at OPEN, the BBS greets ~5 s on
+         lda #cwait
+         sta cwsec
+         lda #pollps
+         sta cwsub
+         #ldxy msg_wcar
+         jsr tputs
+         jmp plrx
+
+pl1      cmp #st_wcar
+         bne pl2
+         jsr rddcd
+         bne pl1b
+         lda #st_onl            ;carrier!
+         sta state
+         lda #0
+         sta lostcnt
+         #ldxy msg_conn
+         jsr tputs
+         jmp plrx
+pl1b     dec cwsub
+         bne plrx
+         lda #pollps
+         sta cwsub
+         dec cwsec
+         bne plrx
+         jmp plnoc
+
+pl2      cmp #st_onl
+         bne plrx
+         jsr rddcd
+         bne pl2b
+         lda #0                 ;carrier present
+         sta lostcnt
+         beq plrx
+pl2b     inc lostcnt            ;debounce ~1 s
+         lda lostcnt
+         cmp #pollps
+         bcc plrx
+plnoc    #ldxy msg_nocar
+         jsr tputs
+         jsr hangup
+
+plrx     lda state              ;drain RX buffer
+         cmp #st_onl
+         bne pldone
+         lda #64                ;max bytes per tick
+         sta rxcnt
+plrx1    ldy ridbs
+         cpy ridbe
+         beq pldone
+         lda (ribuf),y
+         inc ridbs
+         jsr tputc
+         dec rxcnt
+         bne plrx1
+
+pldone   lda tdirty
+         beq plout
+         lda #0
+         sta tdirty
+         ldx layer+slindx
+         jsr markredraw
+plout    rts
+
+;----------------------------------------------------------
+; Keyboard (screen layer handlers)
+;----------------------------------------------------------
+kprnt    jsr readkprnt
+         bcs kpass
+         jsr keyin
+         clc
+         rts
+
+kcmd     jsr readkcmd       ;A = PETSCII, Y = keymods
+         bcs kpass
+         pha                    ;C= or CTRL: menu shortcut.
+         tya                    ;SHIFT alone stays a key
+         and #cbmkey.ctrlkey    ;(CRSR up/left, shifted keys)
+         tay
+         pla
+         cpy #0
+         bne kpass
+         jsr keyin
+         clc
+         rts
+
+kpass    sec
+         rts
+
+keyin    ldx state              ;A = PETSCII
+         cpx #st_onl
+         bne kioff
+         jmp rssend
+kioff    cpx #st_idle
+         beq kiidle
+         #ldxy msg_abort        ;any key aborts dialing
+         jsr tputs
+         jmp hangup
+kiidle   cmp #$0d
+         bne ki1
+         jmp dodial
+ki1      cmp #$14               ;DEL
+         bne ki2
+         ldx dlen
+         beq kix
+         dec dlen
+         jmp tputc
+ki2      cmp #$2c               ;","
+         beq kiadd
+         cmp #$30
+         bcc kix
+         cmp #$3a
+         bcs kix
+kiadd    ldx dlen
+         cpx #maxdial
+         bcs kix
+         sta dialbuf,x
+         inc dlen
+         jmp tputc
+kix      rts
+
+;----------------------------------------------------------
+; Messages (menu actions: "1" dial, "2" hang up, "!" home)
+;----------------------------------------------------------
+msgcmd   #switch 2
+         .byte mc_menq,mc_mnu
+         .rta mnuenq,mnucmd
+         sec
+         rts
+
+mnuenq   lda #0                 ;enabled, not selected
+         clc
+         rts
+
+mnucmd   cpx #$21               ;"!"
+         bne mnc1
+         jmp quitapp
+mnc1     cpx #$31               ;"1"
+         bne mnc2
+         jsr dodial
+         clc
+         rts
+mnc2     cpx #$32               ;"2"
+         bne mnc3
+         jsr hangup
+         clc
+         rts
+mnc3     sec
+         rts
+
+;----------------------------------------------------------
+; drawmain: copy model into system buffers, rows 1..23
+;----------------------------------------------------------
+drawmain lda #<scrdst           ;row-wise copy, so IRQs are only
+         sta dmd+1              ;off for one 40-byte color row
+         lda #>scrdst           ;(~0.6 ms) at a time
+         sta dmd+2
+         lda #<coldst
+         sta dme+1
+         lda #>coldst
+         sta dme+2
+         ldx #0
+dm1      lda rowlo,x            ;patch sources for row X
+         sta dms+1
+         sta dmc+1
+         lda rowshi,x
+         sta dms+2
+         lda rowchi,x
+         sta dmc+2
+         ldy #tcols-1           ;screen row
+dms      lda $ffff,y
+dmd      sta $ffff,y
+         dey
+         bpl dms
+         php                    ;color buffer is RAM under I/O.
+         sei                    ;Map I/O out but keep the KERNAL
+         lda $01                ;ROM in, so NMIs still go via
+         pha                    ;$FE43 -> nmiwrap. Char ROM at
+         and #%11111000         ;$D000: writes fall through to
+         ora #%00000010         ;the RAM below (reads are only
+         sta $01                ;from our buffers < $D000).
+         ldy #tcols-1
+dmc      lda $ffff,y
+dme      sta $ffff,y
+         dey
+         bpl dmc
+         pla
+         sta $01
+         plp
+         clc                    ;next destination row
+         lda dmd+1
+         adc #tcols
+         sta dmd+1
+         bcc dm2
+         inc dmd+2
+dm2      clc
+         lda dme+1
+         adc #tcols
+         sta dme+1
+         bcc dm3
+         inc dme+2
+dm3      inx
+         cpx #trows
+         bne dm1
+         rts
+
+;----------------------------------------------------------
+; Terminal model
+;----------------------------------------------------------
+buildrows lda #0
+         sta bufl
+         lda tscrpg
+         sta bufh
+         lda tcolpg
+         sta bufc
+         ldx #0
+br1      lda bufl
+         sta rowlo,x
+         lda bufh
+         sta rowshi,x
+         lda bufc
+         sta rowchi,x
+         clc
+         lda bufl
+         adc #tcols
+         sta bufl
+         bcc br2
+         inc bufh
+         inc bufc
+br2      inx
+         cpx #trows
+         bne br1
+         rts
+
+tputs    stx tpsrc+1            ;XY -> null terminated
+         sty tpsrc+2
+tpsrc    lda $ffff
+         beq tpsx
+         jsr tputc
+         inc tpsrc+1
+         bne tpsrc
+         inc tpsrc+2
+         bne tpsrc
+tpsx     rts
+
+tputc    stx savx                ;A = PETSCII, keeps X/Y
+         sty savy
+         pha
+         lda #1
+         sta tdirty
+         pla
+         jsr tput1
+         ldx savx
+         ldy savy
+         rts
+
+tput1    #switch 11
+         .byte $0d,$8d,$93,$13,$11,$91
+         .byte $1d,$9d,$12,$92,$14
+         .rta tcr,tcr,tclr,thome,tlf,tup
+         .rta tright,tleft,trvson,trvsof,tdel
+         ldx #15                ;color codes
+tpc1     cmp coltab,x
+         beq tpc2
+         dex
+         bpl tpc1
+         cmp #$20
+         bcc tpx
+         cmp #$80
+         bcc tprint
+         cmp #$a0
+         bcs tprint
+tpx      rts
+tpc2     lda colmap,x           ;BBS colors assume a black
+         sta tcolor             ;background, C64 OS draws on a
+         rts                    ;light one: remap them
+
+tpoke    pha                    ;A = screen code at cx,cy
+         jsr tsetrow
+         pla
+         ldy cx
+tw1      sta $ffff,y
+         lda tcolor
+tw2      sta $ffff,y
+         rts
+
+tprint   jsr pet2scr
+         cmp #$40               ;PETSCII graphics: the C64 OS
+         bcc tpr1               ;charsets have none, so draw
+         tax                    ;an ASCII look-alike instead
+         lda gfxmap-$40,x
+tpr1     ora trvs
+         jsr tpoke
+tright   inc cx
+         lda cx
+         cmp #tcols
+         bcc tpd
+         lda #0
+         sta cx
+         jmp tlf
+tpd      rts
+
+tsetrow  ldx cy                 ;patch tw1/tw2 for row cy
+         lda rowlo,x
+         sta tw1+1
+         sta tw2+1
+         lda rowshi,x
+         sta tw1+2
+         lda rowchi,x
+         sta tw2+2
+         rts
+
+tcr      lda #0
+         sta cx
+         sta trvs
+tlf      inc cy
+         lda cy
+         cmp #trows
+         bcc tpd
+         lda #trows-1
+         sta cy
+         jmp tscroll
+
+tup      lda cy
+         beq tpd
+         dec cy
+         rts
+
+tleft    lda cx
+         beq tl1
+         dec cx
+         rts
+tl1      lda cy
+         beq tpd
+         dec cy
+         lda #tcols-1
+         sta cx
+         rts
+
+thome    lda #0
+         sta cx
+         sta cy
+         rts
+
+trvson   lda #$80
+         sta trvs
+         rts
+
+trvsof   lda #0
+         sta trvs
+         rts
+
+tdel     jsr tleft
+         lda #$20
+         jmp tpoke
+
+tclr     ldx #trows-1
+tc1      jsr tclrrow
+         dex
+         bpl tc1
+         jmp thome
+
+tclrrow  lda rowlo,x            ;X = row, keeps X
+         sta tcr1+1
+         sta tcr2+1
+         lda rowshi,x
+         sta tcr1+2
+         lda rowchi,x
+         sta tcr2+2
+         ldy #tcols-1
+tcr0     lda #$20
+tcr1     sta $ffff,y
+         lda tcolor
+tcr2     sta $ffff,y
+         dey
+         bpl tcr0
+         rts
+
+tscroll  ldx #0
+tsc1     lda rowlo+1,x
+         sta tss+1
+         sta tscc+1
+         lda rowshi+1,x
+         sta tss+2
+         lda rowchi+1,x
+         sta tscc+2
+         lda rowlo,x
+         sta tds+1
+         sta tdc+1
+         lda rowshi,x
+         sta tds+2
+         lda rowchi,x
+         sta tdc+2
+         ldy #tcols-1
+tsc2
+tss      lda $ffff,y
+tds      sta $ffff,y
+tscc      lda $ffff,y
+tdc      sta $ffff,y
+         dey
+         bpl tsc2
+         inx
+         cpx #trows-1
+         bne tsc1
+         jmp tclrrow            ;X = trows-1
+
+; PETSCII -> screen code
+pet2scr  cmp #$40
+         bcc ps0                ;$20-$3f unchanged
+         cmp #$60
+         bcc ps40               ;$40-$5f -> $00-$1f
+         cmp #$80
+         bcc ps20               ;$60-$7f -> $40-$5f
+         cmp #$c0
+         bcc ps40               ;$a0-$bf -> $60-$7f
+         cmp #$ff
+         beq psff
+         sec                    ;$c0-$fe -> $40-$7e
+         sbc #$80
+ps0      rts
+ps40     sec
+         sbc #$40
+         rts
+ps20     sec
+         sbc #$20
+         rts
+psff     lda #$5e
+         rts
+
+coltab   .byte $90,$05,$1c,$9f,$9c,$1e,$1f,$9e
+         .byte $81,$95,$96,$97,$98,$99,$9a,$9b
+
+; Color code -> color drawn on the light C64 OS background.
+; White and the pale colors become a darker shade.
+colmap   .byte 0,0,2,6,4,5,6,8      ;white->black, cyan->blue,
+         .byte 8,9,2,11,12,5,14,11  ;yellow->orange, lt red->red,
+                                    ;lt green->green, lt grey->dk grey
+
+; Screen code $40-$7F (lowercase set) -> C64 OS screen code.
+; C64 OS charset.o is ASCII-like ($40 = "`", $5c = "|",
+; $1f = "_") and ui.charset holds UI icons, so PETSCII line and
+; block graphics become - | + _ # / or a solid (reverse) block.
+gfxmap   .byte $2d,$41,$42,$43,$44,$45,$46,$47  ;$40 horiz. line
+         .byte $48,$49,$4a,$4b,$4c,$4d,$4e,$4f  ;letters A-Z
+         .byte $50,$51,$52,$53,$54,$55,$56,$57
+         .byte $58,$59,$5a,$2b,$23,$5c,$23,$23  ;cross, vert. line
+         .byte $20,$a0,$a0,$2d,$1f,$5c,$23,$5c  ;$60 space, blocks
+         .byte $23,$2f,$5c,$2b,$a0,$2b,$2b,$1f  ;corners, tees
+         .byte $2b,$2b,$2b,$2b,$5c,$a0,$a0,$2d
+         .byte $2d,$1f,$2a,$a0,$a0,$2b,$a0,$23  ;$7a check mark
+
+;----------------------------------------------------------
+; Strings (PETSCII)
+;----------------------------------------------------------
+msg_hello .byte $93
+         .text "VolksTerm 0.1  300 baud 8N1"
+         .byte $0d
+         .text "Type number, RETURN dials."
+         .byte $0d
+         .text "C= D dial, C= X hang up."
+         .byte $0d,0
+msg_prompt .byte $0d
+         .text "Number: "
+         .byte 0
+msg_dial .byte $0d
+         .text "Dialing..."
+         .byte $0d,0
+msg_wcar .text "Waiting for carrier"
+         .byte $0d,0
+msg_conn .text "CONNECT 300"
+         .byte $0d,0
+msg_nocar .byte $0d
+         .text "NO CARRIER"
+         .byte $0d,0
+msg_abort .byte $0d
+         .text "Aborted"
+         .byte $0d,0
+msg_rserr .text "RS-232 OPEN failed!"
+         .byte $0d,0
+
+;----------------------------------------------------------
+; Variables
+;----------------------------------------------------------
+state    .byte 0
+rsopenf  .byte 0
+dlstate  .byte 0
+dlphase  .byte 0
+dltick   .byte 0
+dlcnt    .byte 0
+dlidx    .byte 0
+dlen     .byte 0
+cwsec    .byte 0
+cwsub    .byte 0
+lostcnt  .byte 0
+rxcnt    .byte 0
+cx       .byte 0
+cy       .byte 0
+tcolor   .byte 11               ;dark grey (= mapped lt grey)
+trvs     .byte 0
+tdirty   .byte 1
+savx      .byte 0
+savy      .byte 0
+bufl     .byte 0
+bufh     .byte 0
+bufc     .byte 0
+tscrpg   .byte 0
+tcolpg   .byte 0
+rsbufpg  .byte 0
+wjcnt    .byte 0
+sppb     .byte 0
+savedf   .byte 0                ;1 = savzp/savnmi are valid
+savzp    .byte 0,0,0,0
+savnmi   .byte 0,0
+dialbuf  .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0,0
+rowlo    .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0
+rowshi   .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0
+rowchi   .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0,0
+         .byte 0,0,0,0,0,0,0
+
+;----------------------------------------------------------
+; C64 OS KERNAL link table
+;----------------------------------------------------------
+externs
+           #inc_h "screen"
+markredraw #syscall lscr,markredraw_
+layerpush  #syscall lscr,layerpush_
+
+           #inc_h "service"
+quitapp    #syscall lser,quitapp_
+
+           #inc_h "memory"
+pgalloc    #syscall lmem,pgalloc_
+pgfree     #syscall lmem,pgfree_
+
+           #inc_h "input"
+readkcmd   #syscall linp,readkcmd_
+readkprnt  #syscall linp,readkprnt_
+
+           #inc_h "timers"
+timeque    #syscall ltim,timeque_
+
+           .byte $ff            ;terminator

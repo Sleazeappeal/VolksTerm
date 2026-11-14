@@ -1,0 +1,3 @@
+# Store every file byte for byte: install.sh needs LF, the BBS
+# screens and C64 sources must keep their exact line endings.
+* -text

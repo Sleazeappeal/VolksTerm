@@ -1,0 +1,15 @@
+About VolksTerm
+
+VolksTerm 0.1 is a 300 baud PETSCII terminal with software pulse dialing, for "dumb" user-port modems with the Commodore 1650 pinout (Volks 6420).
+
+Set the C64 OS network driver to None, so no driver claims the user port.
+
+Dialing
+
+Type the number, then RETURN (or C=+D) to dial. Any key aborts while dialing. After dialing VolksTerm waits for the carrier, then shows CONNECT 300.
+
+Online
+
+Keys go to the modem, text from the modem goes to the screen. C=+X hangs up. CTRL+C=+H goes home.
+
+Opening a utility (About, Help...) pauses the modem input while C64 OS loads it from disk; VolksTerm turns it back on when it returns. Text that arrives during the load is lost.

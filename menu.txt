@@ -1,0 +1,5 @@
+Terminal;c
+Dial:2d1
+Hang up:2x2
+Go Home:6h!
+

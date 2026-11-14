@@ -1,0 +1,22 @@
+# Local test environment: downloaded tools, cloned references,
+# screenshots and C64 OS disk images (not ours to redistribute)
+/tools/*
+!/tools/vice/
+/tools/vice/*
+!/tools/vice/volksterm.ini
+/ref/
+/scrn/
+*.dhd
+*.dhd_orig
+/.claude/
+
+# C64 OS SDK headers: OpCoders' work, not ours to publish.
+# Copy them from c64os-dev (see README, Step 2: build).
+/os/
+
+# Build output (the .car goes into a release, not the repo)
+/dist/
+*.o
+*.lst
+.build
+monitor.log
