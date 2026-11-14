@@ -148,7 +148,7 @@ Az `M=M/2` szándékos: a CBM BASIC `2^B` számítása pontatlan, az `AND` pedig
 
 - **Mit csinál:** bekér egy számot, off-hook állapotba megy, vár 2 másodpercet, majd impulzusokkal tárcsáz: 60 ms bontás, 40 ms zárás, a számjegyek között 800 ms. Billentyűnyomásra leteszi a vonalat. A nem számjegy karaktereket kihagyja.
 - **Időzítés:** a CIA2 hardveres timerével megy, így független a C128 megszakítás-frekvenciájától.
-- **NTSC gép esetén:** a 20-as sorban `CL=1022727`. PAL gépnél (Svájc) nincs teendő.
+- **NTSC gép esetén:** a 20-as sorban `CL=1022727`. PAL gépnél nincs teendő.
 - **Valós időzítés:** a BASIC futási ideje miatt minden szakasz várhatóan pár ms-mal hosszabb (becslés). Ha az ATA rosszul érti a számjegyeket, csökkentsd a `BR`/`MK` értéket, például 55/35-re.
 - **Előfeltétel:** csak akkor használd, ha a HOOKTEST már igazolta, hogy a hook-relé a PB5-re reagál.
 

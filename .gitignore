@@ -22,3 +22,5 @@
 *.lst
 .build
 monitor.log
+# Kept locally only (the .md has the same content)
+Claude_proj/*.pdf

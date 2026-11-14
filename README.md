@@ -9,9 +9,9 @@ VolksTerm (`main.a`, the icon, the bundle files) is Copyright (c) 2026
 Sleazy, MIT License: see `LICENSE`. The installed app carries the same
 text in `readme.t`, and `about.t` names the author.
 
-- Started with Claude (claude.ai, the online client): the Volks 6420
-  diagnosis and the C128 BASIC 7.0 test programs in `Claude_proj/`
-  (Hungarian) were made there.
+- Started with Claude Opus 5.5 on claude.ai (the online client): the
+  Volks 6420 diagnosis and the C128 BASIC 7.0 test programs in
+  `Claude_proj/` were made there.
 - Made with Claude Code: VolksTerm 0.1 (`main.a`, `carhelp.py`,
   `linetest.bas`, the help and readme texts, this README and the `bbs/`
   package) was written with Claude Code 2.1.325 by Anthropic, model Claude
@@ -44,7 +44,7 @@ text in `readme.t`, and `about.t` names the author.
 | `LICENSE` | MIT license of VolksTerm |
 | `linetest.bas` | BASIC hardware test: hook, pulse dial, DCD |
 | `bbs/` | Synchronet 40-column screens + `install.sh` (see "BBS side"), GPL |
-| `Claude_proj/` | Volks 6420 diagnosis on the C128 from the claude.ai start of the project (Hungarian, `.md` + `.pdf`) |
+| `Claude_proj/` | Volks 6420 diagnosis on the C128 from the claude.ai start of the project (Hungarian `.md`) and its BASIC 7.0 test programs (`portmon`, `hooktest`, `txtest`, `pulse.prg`). The `pulse.prg` there is a later version with a machine-code pulse routine; the `.md` lists the first, BASIC-only one |
 
 ## Step 1: verify the hardware first (plain C64 mode, no C64 OS)
 
