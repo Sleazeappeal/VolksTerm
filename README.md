@@ -1,7 +1,8 @@
 # VolksTerm 0.1: C64 OS terminal for the Volks 6420
 
 300 baud, 8N1, PETSCII terminal. Pulse dialing in software. For "dumb" user-port
-modems with the Commodore 1650 pinout (Volks 6420 assumed compatible, see Step 1).
+modems with the Commodore 1650 pinout. The Volks 6420 works with it on real
+hardware (see "Test methodology").
 
 ## License and credits
 
